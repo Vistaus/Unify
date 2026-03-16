@@ -11,6 +11,9 @@ Item {
     // Public API
     property var services: [] // array of { id, title, url }
     property var disabledServices: ({})
+    property var mutedServices: ({})
+    property var serviceTabs: ({})
+    property bool globalMute: false
     // Number of services visible in the current workspace (for empty state logic)
     property int filteredCount: 0
     // Current workspace name (for customizing empty state message)
@@ -19,14 +22,26 @@ Item {
     property WebEngineProfile webProfile
     // Callback to update badge from title
     property var onTitleUpdated: null
+    // Workspace isolated storage info (provided by Main.qml)
+    property var workspaceIsolatedStorage: ({})
 
     // Signal to propagate service URL update requests
     signal updateServiceUrlRequested(string serviceId, string newUrl)
+
+    // Signal to propagate fullscreen requests to main window
+    signal fullscreenRequested(var webEngineView, bool toggleOn)
+
+    // Signal to propagate zoom factor changes
+    signal serviceZoomFactorChanged(string serviceId, real zoomFactor)
+
+    // Signal to propagate tab changes for persistence
+    signal tabsUpdated(string serviceId, var tabs)
 
     // Internal properties
     property string currentServiceId: ""
     property var webViewCache: ({}) // serviceId -> WebView component instance
     property var isolatedProfiles: ({}) // serviceId -> WebEngineProfile for isolated services
+    property var workspaceProfiles: ({}) // workspaceName -> WebEngineProfile for isolated workspaces
     property bool isInitialized: false
 
     // Track which services are currently playing audio
@@ -52,6 +67,30 @@ Item {
                 var view = webViewCache[serviceId];
                 if (view) {
                     view.isServiceDisabled = isDisabled(serviceId);
+                }
+            }
+        }
+    }
+
+    // Update all webviews when mutedServices changes
+    onMutedServicesChanged: {
+        for (var serviceId in webViewCache) {
+            if (webViewCache.hasOwnProperty(serviceId)) {
+                var view = webViewCache[serviceId];
+                if (view) {
+                    view.isMuted = mutedServices && mutedServices.hasOwnProperty(serviceId);
+                }
+            }
+        }
+    }
+
+    // Update all webviews when globalMute changes
+    onGlobalMuteChanged: {
+        for (var serviceId in webViewCache) {
+            if (webViewCache.hasOwnProperty(serviceId)) {
+                var view = webViewCache[serviceId];
+                if (view) {
+                    view.globalMute = root.globalMute;
                 }
             }
         }
@@ -140,6 +179,21 @@ Item {
         return null;
     }
 
+    // Set zoom factor for a specific service
+    function setZoomFactor(serviceId, zoomFactor) {
+        if (webViewCache[serviceId]) {
+            webViewCache[serviceId].zoomFactor = zoomFactor;
+        }
+    }
+
+    // Get zoom factor for a specific service
+    function getZoomFactor(serviceId) {
+        if (webViewCache[serviceId]) {
+            return webViewCache[serviceId].zoomFactor;
+        }
+        return 1.0;
+    }
+
     // Detach a ServiceWebView from the stack (for reparenting to external window)
     // Returns the ServiceWebView instance that was detached
     function detachWebView(serviceId) {
@@ -219,6 +273,41 @@ Item {
         return profile;
     }
 
+    function getOrCreateWorkspaceProfile(workspaceName, userAgent) {
+        // Check if we already have an isolated profile for this workspace
+        if (workspaceProfiles[workspaceName]) {
+            console.log("Reusing existing workspace profile for:", workspaceName);
+            return workspaceProfiles[workspaceName];
+        }
+
+        console.log("Creating NEW workspace isolated profile for:", workspaceName);
+
+        // Create a new isolated profile for this workspace
+        // Note: storageName MUST be set at creation time and cannot be changed later
+        // Use a sanitized workspace name for the storage path
+        var sanitizedName = workspaceName.replace(/[^a-zA-Z0-9_-]/g, "_").toLowerCase();
+        var profile = isolatedProfileComponent.createObject(root, {
+            "storageName": "unify-workspace-" + sanitizedName,
+            "httpUserAgent": userAgent || ""
+        });
+
+        if (profile) {
+            var profiles = root.workspaceProfiles;
+            profiles[workspaceName] = profile;
+            root.workspaceProfiles = profiles;
+            console.log("Created workspace profile for:", workspaceName, "storageName:", profile.storageName, "offTheRecord:", profile.offTheRecord);
+        } else {
+            console.error("Failed to create workspace profile component for:", workspaceName);
+        }
+
+        return profile;
+    }
+
+    // Helper to check if a workspace has isolated storage
+    function isWorkspaceIsolated(workspaceName) {
+        return workspaceIsolatedStorage && workspaceIsolatedStorage.hasOwnProperty(workspaceName) && workspaceIsolatedStorage[workspaceName] === true;
+    }
+
     function createWebViewForService(serviceId) {
         // Don't create if profile is not ready
         if (!root.webProfile) {
@@ -258,15 +347,31 @@ Item {
         // Create the instance with delayed URL loading for disabled services
         var initialUrl = root.isDisabled(serviceData.id) ? "about:blank" : serviceData.url;
 
-        // Determine which profile to use: isolated or shared
+        // Determine which profile to use based on priority:
+        // 1. Service-level isolated profile (highest priority)
+        // 2. Workspace-level isolated profile
+        // 3. Shared profile (default)
         var profileToUse = root.webProfile;
+        var userAgent = root.webProfile ? root.webProfile.httpUserAgent : "";
+        var isolationType = "shared";
+        
         if (serviceData.isolatedProfile) {
-            // Pass the user agent from the shared profile to maintain consistency
-            var userAgent = root.webProfile ? root.webProfile.httpUserAgent : "";
+            // Service-level isolation takes priority
             profileToUse = getOrCreateIsolatedProfile(serviceData.id, userAgent);
+            isolationType = "service-isolated";
             if (!profileToUse) {
                 console.error("Failed to create isolated profile for service:", serviceId);
                 profileToUse = root.webProfile; // Fallback to shared profile
+                isolationType = "shared";
+            }
+        } else if (serviceData.workspace && isWorkspaceIsolated(serviceData.workspace)) {
+            // Workspace-level isolation
+            profileToUse = getOrCreateWorkspaceProfile(serviceData.workspace, userAgent);
+            isolationType = "workspace-isolated:" + serviceData.workspace;
+            if (!profileToUse) {
+                console.error("Failed to create workspace profile for:", serviceData.workspace);
+                profileToUse = root.webProfile; // Fallback to shared profile
+                isolationType = "shared";
             }
         }
 
@@ -277,8 +382,12 @@ Item {
             "configuredUrl": serviceData.url,
             "webProfile": profileToUse,
             "isServiceDisabled": root.isDisabled(serviceData.id),
+            "isMuted": root.mutedServices && root.mutedServices.hasOwnProperty(serviceData.id),
+            "globalMute": root.globalMute,
             "onTitleUpdated": root.onTitleUpdated,
-            "stackIndex": nextIndex
+            "stackIndex": nextIndex,
+            "zoomFactor": serviceData.zoomFactor || 1.0,
+            "restoredTabs": root.serviceTabs && root.serviceTabs[serviceData.id] ? root.serviceTabs[serviceData.id] : []
         });
 
         if (!instance) {
@@ -289,6 +398,16 @@ Item {
         // Connect the updateServiceUrlRequested signal
         instance.updateServiceUrlRequested.connect(function (svcId, newUrl) {
             root.updateServiceUrlRequested(svcId, newUrl);
+        });
+
+        // Connect the fullscreen request signal
+        instance.fullscreenRequested.connect(function (webEngineView, toggleOn) {
+            root.fullscreenRequested(webEngineView, toggleOn);
+        });
+
+        // Connect the zoom factor change signal
+        instance.zoomFactorUpdated.connect(function (svcId, zoomFactor) {
+            root.serviceZoomFactorChanged(svcId, zoomFactor);
         });
 
         // Monitor audio playback state changes
@@ -317,12 +436,17 @@ Item {
             console.log("🎵 Updated mediaMetadata:", JSON.stringify(root.mediaMetadata));
         });
 
+        // Monitor tab changes for persistence
+        instance.serviceTabsUpdated.connect(function (svcId, tabs) {
+            root.tabsUpdated(svcId, tabs);
+        });
+
         // Store in cache
         var cache = root.webViewCache;
         cache[serviceId] = instance;
         root.webViewCache = cache;
 
-        console.log("Created WebView for service:", serviceId, "at index:", nextIndex, serviceData.isolatedProfile ? "(isolated)" : "(shared)");
+        console.log("Created WebView for service:", serviceId, "at index:", nextIndex, "(" + isolationType + ")");
     }
 
     function updateWebViewForService(serviceId, serviceData) {

@@ -86,6 +86,44 @@ void ConfigManager::setWorkspaceIcon(const QString &workspace, const QString &ic
     }
 }
 
+QVariantMap ConfigManager::workspaceIsolatedStorage() const
+{
+    QVariantMap map;
+    for (auto it = m_workspaceIsolatedStorage.constBegin(); it != m_workspaceIsolatedStorage.constEnd(); ++it) {
+        map.insert(it.key(), it.value());
+    }
+    return map;
+}
+
+bool ConfigManager::isWorkspaceIsolated(const QString &workspace) const
+{
+    return m_workspaceIsolatedStorage.value(workspace, false);
+}
+
+void ConfigManager::setWorkspaceIsolatedStorage(const QString &workspace, bool isolated)
+{
+    if (workspace.isEmpty()) {
+        return;
+    }
+
+    // Protect special workspaces from isolated storage changes
+    if (isSpecialWorkspace(workspace)) {
+        qDebug() << "Cannot change isolated storage for special workspace:" << workspace;
+        return;
+    }
+
+    const auto it = m_workspaceIsolatedStorage.find(workspace);
+    if (it == m_workspaceIsolatedStorage.end() || it.value() != isolated) {
+        if (!isolated) {
+            m_workspaceIsolatedStorage.remove(workspace);
+        } else {
+            m_workspaceIsolatedStorage.insert(workspace, isolated);
+        }
+        Q_EMIT workspaceIsolatedStorageChanged();
+        saveSettings();
+    }
+}
+
 QVariantMap ConfigManager::disabledServices() const
 {
     return m_disabledServices;
@@ -133,6 +171,109 @@ bool ConfigManager::isServiceDisabled(const QString &serviceId) const
     return m_disabledServices.contains(serviceId) && m_disabledServices.value(serviceId).toBool();
 }
 
+QVariantMap ConfigManager::mutedServices() const
+{
+    return m_mutedServices;
+}
+
+void ConfigManager::setMutedServices(const QVariantMap &mutedServices)
+{
+    if (m_mutedServices != mutedServices) {
+        m_mutedServices = mutedServices;
+        Q_EMIT mutedServicesChanged();
+        saveSettings();
+    }
+}
+
+void ConfigManager::setServiceMuted(const QString &serviceId, bool muted)
+{
+    if (serviceId.isEmpty()) {
+        return;
+    }
+
+    bool changed = false;
+    if (muted) {
+        if (!m_mutedServices.contains(serviceId) || m_mutedServices.value(serviceId).toBool() != true) {
+            m_mutedServices.insert(serviceId, true);
+            changed = true;
+        }
+    } else {
+        if (m_mutedServices.contains(serviceId)) {
+            m_mutedServices.remove(serviceId);
+            changed = true;
+        }
+    }
+
+    if (changed) {
+        Q_EMIT mutedServicesChanged();
+        saveSettings();
+        qDebug() << "Service" << serviceId << (muted ? "muted" : "unmuted");
+    }
+}
+
+bool ConfigManager::isServiceMuted(const QString &serviceId) const
+{
+    return m_mutedServices.contains(serviceId) && m_mutedServices.value(serviceId).toBool();
+}
+
+QVariantMap ConfigManager::serviceTabs() const
+{
+    return m_serviceTabs;
+}
+
+QVariantList ConfigManager::getTabsForService(const QString &serviceId) const
+{
+    if (m_serviceTabs.contains(serviceId)) {
+        return m_serviceTabs.value(serviceId).toList();
+    }
+    return QVariantList();
+}
+
+void ConfigManager::setTabsForService(const QString &serviceId, const QVariantList &tabs)
+{
+    if (serviceId.isEmpty()) {
+        return;
+    }
+
+    if (tabs.isEmpty()) {
+        if (m_serviceTabs.contains(serviceId)) {
+            m_serviceTabs.remove(serviceId);
+            Q_EMIT serviceTabsChanged();
+            saveSettings();
+        }
+    } else {
+        m_serviceTabs.insert(serviceId, tabs);
+        Q_EMIT serviceTabsChanged();
+        saveSettings();
+        qDebug() << "Saved" << tabs.size() << "tabs for service:" << serviceId;
+    }
+}
+
+void ConfigManager::clearTabsForService(const QString &serviceId)
+{
+    if (m_serviceTabs.contains(serviceId)) {
+        m_serviceTabs.remove(serviceId);
+        Q_EMIT serviceTabsChanged();
+        saveSettings();
+        qDebug() << "Cleared tabs for service:" << serviceId;
+    }
+}
+
+bool ConfigManager::globalMute() const
+{
+    return m_globalMute;
+}
+
+void ConfigManager::setGlobalMute(bool enabled)
+{
+    if (m_globalMute != enabled) {
+        m_globalMute = enabled;
+        Q_EMIT globalMuteChanged();
+        saveSettings();
+        qDebug() << "Global mute" << (enabled ? "enabled" : "disabled");
+    }
+}
+
 bool ConfigManager::horizontalSidebar() const
 {
     return m_horizontalSidebar;
@@ -161,6 +302,48 @@ void ConfigManager::setAlwaysShowWorkspacesBar(bool enabled)
     }
 }
 
+bool ConfigManager::confirmDownloads() const
+{
+    return m_confirmDownloads;
+}
+
+void ConfigManager::setConfirmDownloads(bool enabled)
+{
+    if (m_confirmDownloads != enabled) {
+        m_confirmDownloads = enabled;
+        Q_EMIT confirmDownloadsChanged();
+        saveSettings();
+    }
+}
+
+bool ConfigManager::systemTrayEnabled() const
+{
+    return m_systemTrayEnabled;
+}
+
+void ConfigManager::setSystemTrayEnabled(bool enabled)
+{
+    if (m_systemTrayEnabled != enabled) {
+        m_systemTrayEnabled = enabled;
+        Q_EMIT systemTrayEnabledChanged();
+        saveSettings();
+    }
+}
+
+bool ConfigManager::showZoomInHeader() const
+{
+    return m_showZoomInHeader;
+}
+
+void ConfigManager::setShowZoomInHeader(bool enabled)
+{
+    if (m_showZoomInHeader != enabled) {
+        m_showZoomInHeader = enabled;
+        Q_EMIT showZoomInHeaderChanged();
+        saveSettings();
+    }
+}
+
 void ConfigManager::addService(const QVariantMap &service)
 {
     QVariantMap newService = service;
@@ -178,20 +361,20 @@ void ConfigManager::addService(const QVariantMap &service)
     // Find the correct position to insert - after the last service of the same workspace
     const QString targetWorkspace = newService[QStringLiteral("workspace")].toString();
     int insertPosition = -1;
-    
+
     for (int i = 0; i < m_services.size(); ++i) {
         QVariantMap existingService = m_services[i].toMap();
         if (existingService[QStringLiteral("workspace")].toString() == targetWorkspace) {
             insertPosition = i + 1;
         }
     }
-    
+
     if (insertPosition >= 0 && insertPosition <= m_services.size()) {
         m_services.insert(insertPosition, newService);
     } else {
         m_services.append(newService);
     }
-    
+
     updateWorkspacesList();
     Q_EMIT servicesChanged();
     saveSettings();
@@ -206,17 +389,17 @@ void ConfigManager::updateService(const QString &serviceId, const QVariantMap &s
         if (existingService[QStringLiteral("id")].toString() == serviceId) {
             QVariantMap updatedService = service;
             updatedService[QStringLiteral("id")] = serviceId; // Preserve the ID
-            
+
             // Preserve the favorite status if it exists in the original service
             if (existingService.contains(QStringLiteral("favorite"))) {
                 updatedService[QStringLiteral("favorite")] = existingService[QStringLiteral("favorite")];
             }
-            
+
             // Preserve the isolatedProfile flag - it cannot be changed after creation
             if (existingService.contains(QStringLiteral("isolatedProfile"))) {
                 updatedService[QStringLiteral("isolatedProfile")] = existingService[QStringLiteral("isolatedProfile")];
             }
-            
+
             m_services[i] = updatedService;
             updateWorkspacesList();
             Q_EMIT servicesChanged();
@@ -262,14 +445,21 @@ void ConfigManager::moveService(int fromIndex, int toIndex)
     qDebug() << "Moved service from index" << fromIndex << "to" << toIndex;
 }
 
-void ConfigManager::addWorkspace(const QString &workspaceName)
+void ConfigManager::addWorkspace(const QString &workspaceName, bool isolatedStorage)
 {
     if (!workspaceName.isEmpty() && !m_workspaces.contains(workspaceName)) {
         m_workspaces.append(workspaceName);
+
+        // Set isolated storage if requested
+        if (isolatedStorage) {
+            m_workspaceIsolatedStorage.insert(workspaceName, true);
+            Q_EMIT workspaceIsolatedStorageChanged();
+        }
+
         Q_EMIT workspacesChanged();
         saveSettings();
 
-        qDebug() << "Added workspace:" << workspaceName;
+        qDebug() << "Added workspace:" << workspaceName << (isolatedStorage ? "(isolated)" : "(shared)");
     }
 }
 
@@ -296,6 +486,12 @@ void ConfigManager::removeWorkspace(const QString &workspaceName)
         if (m_workspaceIcons.contains(workspaceName)) {
             m_workspaceIcons.remove(workspaceName);
             Q_EMIT workspaceIconsChanged();
+        }
+
+        // Remove isolated storage mapping if present
+        if (m_workspaceIsolatedStorage.contains(workspaceName)) {
+            m_workspaceIsolatedStorage.remove(workspaceName);
+            Q_EMIT workspaceIsolatedStorageChanged();
         }
 
         // If current workspace was removed, switch to first available or create Personal
@@ -354,6 +550,14 @@ void ConfigManager::renameWorkspace(const QString &oldName, const QString &newNa
             Q_EMIT workspaceIconsChanged();
         }
 
+        // Move isolated storage mapping along with the rename
+        if (m_workspaceIsolatedStorage.contains(oldName)) {
+            const bool isolated = m_workspaceIsolatedStorage.value(oldName);
+            m_workspaceIsolatedStorage.remove(oldName);
+            m_workspaceIsolatedStorage.insert(newName, isolated);
+            Q_EMIT workspaceIsolatedStorageChanged();
+        }
+
         Q_EMIT servicesChanged();
         Q_EMIT workspacesChanged();
         saveSettings();
@@ -380,6 +584,14 @@ void ConfigManager::saveSettings()
         }
         m_settings.setValue(QStringLiteral("icons"), iconMap);
     }
+    // Persist workspace isolated storage map
+    {
+        QVariantMap isolatedMap;
+        for (auto it = m_workspaceIsolatedStorage.constBegin(); it != m_workspaceIsolatedStorage.constEnd(); ++it) {
+            isolatedMap.insert(it.key(), it.value());
+        }
+        m_settings.setValue(QStringLiteral("isolatedStorage"), isolatedMap);
+    }
     m_settings.endGroup();
 
     // Persist last used service per workspace
@@ -396,10 +608,23 @@ void ConfigManager::saveSettings()
     m_settings.setValue(QStringLiteral("list"), m_disabledServices);
     m_settings.endGroup();
 
+    // Persist muted services
+    m_settings.beginGroup(QStringLiteral("MutedServices"));
+    m_settings.setValue(QStringLiteral("list"), m_mutedServices);
+    m_settings.endGroup();
+
+    // Persist service tabs
+    m_settings.beginGroup(QStringLiteral("ServiceTabs"));
+    m_settings.setValue(QStringLiteral("tabs"), m_serviceTabs);
+    m_settings.endGroup();
+
     // Persist display settings
     m_settings.beginGroup(QStringLiteral("Display"));
     m_settings.setValue(QStringLiteral("horizontalSidebar"), m_horizontalSidebar);
     m_settings.setValue(QStringLiteral("alwaysShowWorkspacesBar"), m_alwaysShowWorkspacesBar);
+    m_settings.setValue(QStringLiteral("systemTrayEnabled"), m_systemTrayEnabled);
+    m_settings.setValue(QStringLiteral("showZoomInHeader"), m_showZoomInHeader);
+    m_settings.setValue(QStringLiteral("globalMute"), m_globalMute);
     m_settings.endGroup();
 
     m_settings.sync();
@@ -425,6 +650,14 @@ void ConfigManager::loadSettings()
             m_workspaceIcons.insert(it.key(), it.value().toString());
         }
     }
+    // Load workspace isolated storage map
+    {
+        const QVariantMap isolatedMap = m_settings.value(QStringLiteral("isolatedStorage"), QVariantMap()).toMap();
+        m_workspaceIsolatedStorage.clear();
+        for (auto it = isolatedMap.constBegin(); it != isolatedMap.constEnd(); ++it) {
+            m_workspaceIsolatedStorage.insert(it.key(), it.value().toBool());
+        }
+    }
     m_settings.endGroup();
 
     // Load last used service mapping
@@ -441,10 +674,24 @@ void ConfigManager::loadSettings()
     m_disabledServices = m_settings.value(QStringLiteral("list"), QVariantMap()).toMap();
     m_settings.endGroup();
 
+    // Load muted services
+    m_settings.beginGroup(QStringLiteral("MutedServices"));
+    m_mutedServices = m_settings.value(QStringLiteral("list"), QVariantMap()).toMap();
+    m_settings.endGroup();
+
+    // Load service tabs
+    m_settings.beginGroup(QStringLiteral("ServiceTabs"));
+    m_serviceTabs = m_settings.value(QStringLiteral("tabs"), QVariantMap()).toMap();
+    m_settings.endGroup();
+
     // Load display settings
     m_settings.beginGroup(QStringLiteral("Display"));
     m_horizontalSidebar = m_settings.value(QStringLiteral("horizontalSidebar"), false).toBool();
     m_alwaysShowWorkspacesBar = m_settings.value(QStringLiteral("alwaysShowWorkspacesBar"), false).toBool();
+    m_confirmDownloads = m_settings.value(QStringLiteral("confirmDownloads"), true).toBool();
+    m_systemTrayEnabled = m_settings.value(QStringLiteral("systemTrayEnabled"), true).toBool();
+    m_showZoomInHeader = m_settings.value(QStringLiteral("showZoomInHeader"), true).toBool();
+    m_globalMute = m_settings.value(QStringLiteral("globalMute"), false).toBool();
     m_settings.endGroup();
 
     // Only update workspaces list if it's empty (first run)
@@ -535,4 +782,31 @@ bool ConfigManager::isServiceFavorite(const QString &serviceId) const
         }
     }
     return false;
+}
+
+void ConfigManager::setServiceZoomFactor(const QString &serviceId, qreal zoomFactor)
+{
+    for (int i = 0; i < m_services.size(); ++i) {
+        QVariantMap service = m_services[i].toMap();
+        if (service[QStringLiteral("id")].toString() == serviceId) {
+            service[QStringLiteral("zoomFactor")] = zoomFactor;
+            m_services[i] = service;
+            Q_EMIT servicesChanged();
+            saveSettings();
+            qDebug() << "Service" << serviceId << "zoom factor set to" << zoomFactor;
+            return;
+        }
+    }
+    qDebug() << "Service not found for zoom factor update:" << serviceId;
+}
+
+qreal ConfigManager::serviceZoomFactor(const QString &serviceId) const
+{
+    for (const QVariant &varService : m_services) {
+        QVariantMap service = varService.toMap();
+        if (service[QStringLiteral("id")].toString() == serviceId) {
+            return service.value(QStringLiteral("zoomFactor"), 1.0).toReal();
+        }
+    }
+    return 1.0;
 }

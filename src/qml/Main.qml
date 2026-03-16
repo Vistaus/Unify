@@ -4,6 +4,7 @@ import QtQuick.Window
 import QtQuick.Layouts
 import QtCore
 import QtWebEngine
+import QtQuick.Controls as Controls
 // Controls are used in components; WebEngine used here for profile
 import org.kde.kirigami as Kirigami
 // Note: QML files are flattened into module root by CMake.
@@ -45,12 +46,28 @@ Kirigami.ApplicationWindow {
         }
     }
 
+    // Update zoom factor when current service changes
+    onCurrentServiceIdChanged: {
+        if (currentServiceId && configManager) {
+            currentZoomFactor = configManager.serviceZoomFactor(currentServiceId);
+        } else {
+            currentZoomFactor = 1.0;
+        }
+    }
+
     // Object to track disabled service IDs (using object instead of Set for QML compatibility)
     // Now loaded from and saved to configManager
     property var disabledServices: configManager ? configManager.disabledServices : ({})
 
     // Object to track detached service IDs and their window instances
     property var detachedServices: ({})
+
+    // Fullscreen state tracking for page-initiated fullscreen (e.g., YouTube videos)
+    property bool isContentFullscreen: false
+    property var fullscreenWebView: null
+    property var fullscreenOriginalParent: null
+    property bool wasWindowFullScreenBeforeContent: false
+    property color fullscreenOriginalBgColor: "transparent"
 
     // Temporary property to track which service is being edited (to avoid changing currentServiceId)
     property string editingServiceId: ""
@@ -61,8 +78,17 @@ Kirigami.ApplicationWindow {
     // Object to track services currently playing audio
     property var serviceAudibleStates: ({})
 
+    // Object to track muted services
+    property var mutedServices: configManager ? configManager.mutedServices : ({})
+
+    // Global mute state
+    property bool globalMute: configManager ? configManager.globalMute : false
+
     // Object to track media metadata for services playing audio
     property var serviceMediaMetadata: ({})
+
+    // Current zoom factor for the selected service (default 1.0 = 100%)
+    property real currentZoomFactor: 1.0
 
     // Computed property for the currently playing service info (first audible service)
     // Kept for backward compatibility
@@ -217,6 +243,32 @@ Kirigami.ApplicationWindow {
             return;
         var isFavorite = configManager.isServiceFavorite(id);
         configManager.setServiceFavorite(id, !isFavorite);
+    }
+
+    // Function to toggle mute status of a service
+    function handleToggleMute(id) {
+        if (!configManager)
+            return;
+        var isMuted = configManager.isServiceMuted(id);
+        configManager.setServiceMuted(id, !isMuted);
+    }
+
+    // Function to toggle global mute
+    function handleToggleGlobalMute() {
+        if (!configManager)
+            return;
+        configManager.globalMute = !configManager.globalMute;
+    }
+
+    // Function to set zoom factor for current service
+    function setZoomFactor(zoomFactor) {
+        if (!configManager || !currentServiceId)
+            return;
+        configManager.setServiceZoomFactor(currentServiceId, zoomFactor);
+        currentZoomFactor = zoomFactor;
+        if (webViewStack) {
+            webViewStack.setZoomFactor(currentServiceId, zoomFactor);
+        }
     }
 
     // Function to switch workspace and select first service
@@ -398,24 +450,93 @@ Kirigami.ApplicationWindow {
         }
 
         onDownloadRequested: function (download) {
-            var downloadDirUrl = StandardPaths.writableLocation(StandardPaths.DownloadLocation);
-            var downloadDir = downloadDirUrl.toString().replace("file://", "");
+            if (configManager && configManager.confirmDownloads) {
+                // Show confirmation dialog
+                downloadConfirmDialog.pendingDownload = download;
+                downloadConfirmDialog.fileName = download.suggestedFileName;
+                downloadConfirmDialog.open();
+            } else {
+                // Auto-accept (original behavior)
+                var downloadDirUrl = StandardPaths.writableLocation(StandardPaths.DownloadLocation);
+                var downloadDir = downloadDirUrl.toString().replace("file://", "");
 
-            // Get unique filename to avoid overwriting existing files
-            var fileName = fileUtils.getUniqueFileName(downloadDir, download.suggestedFileName);
+                // Get unique filename to avoid overwriting existing files
+                var fileName = fileUtils.getUniqueFileName(downloadDir, download.suggestedFileName);
 
-            download.downloadDirectory = downloadDir;
-            download.downloadFileName = fileName;
+                download.downloadDirectory = downloadDir;
+                download.downloadFileName = fileName;
 
-            // Monitor download completion
-            download.isFinishedChanged.connect(function () {
-                if (download.isFinished) {
-                    var fullPath = downloadDir + "/" + fileName;
-                    root.showPassiveNotification(i18n("Download completed: %1", fileName), "long");
-                }
-            });
+                // Monitor download completion
+                download.isFinishedChanged.connect(function () {
+                    if (download.isFinished) {
+                        var fullPath = downloadDir + "/" + fileName;
+                        root.showPassiveNotification(i18n("Download completed: %1", fileName), "long");
+                    }
+                });
 
-            download.accept();
+                download.accept();
+            }
+        }
+    }
+
+    // Download confirmation dialog
+    Kirigami.Dialog {
+        id: downloadConfirmDialog
+
+        title: i18n("Confirm Download")
+        standardButtons: Kirigami.Dialog.Ok | Kirigami.Dialog.Cancel
+        preferredWidth: Kirigami.Units.gridUnit * 25
+        padding: Kirigami.Units.largeSpacing
+
+        property var pendingDownload: null
+        property string fileName: ""
+
+        onAccepted: {
+            if (pendingDownload) {
+                // Capture download in local variable for the signal handler
+                var download = pendingDownload;
+                var downloadDirUrl = StandardPaths.writableLocation(StandardPaths.DownloadLocation);
+                var downloadDir = downloadDirUrl.toString().replace("file://", "");
+                var uniqueFileName = fileUtils.getUniqueFileName(downloadDir, fileName);
+
+                download.downloadDirectory = downloadDir;
+                download.downloadFileName = uniqueFileName;
+
+                download.isFinishedChanged.connect(function () {
+                    if (download.isFinished) {
+                        root.showPassiveNotification(i18n("Download completed: %1", uniqueFileName), "long");
+                    }
+                });
+
+                download.accept();
+                pendingDownload = null;
+            }
+        }
+
+        onRejected: {
+            if (pendingDownload) {
+                // Don't call accept() - the download will be discarded
+                pendingDownload = null;
+            }
+        }
+
+        ColumnLayout {
+            spacing: Kirigami.Units.largeSpacing
+
+            Controls.Label {
+                text: i18n("Do you want to download this file?")
+                font.bold: true
+                Layout.fillWidth: true
+            }
+
+            Kirigami.Separator {
+                Layout.fillWidth: true
+            }
+
+            Controls.Label {
+                text: i18n("File: %1", downloadConfirmDialog.fileName)
+                Layout.fillWidth: true
+            }
         }
     }
 
@@ -434,6 +555,7 @@ Kirigami.ApplicationWindow {
         }
         onAddWorkspaceRequested: {
             addWorkspaceDialog.isEditMode = false;
+            addWorkspaceDialog.initialIsolatedStorage = false;
             addWorkspaceDialog.clearFields();
             addWorkspaceDialog.open();
         }
@@ -448,6 +570,12 @@ Kirigami.ApplicationWindow {
                     addWorkspaceDialog.initialIcon = iconMap[addWorkspaceDialog.initialName] || "folder";
                 } else {
                     addWorkspaceDialog.initialIcon = "folder";
+                }
+                // Pre-fill isolated storage status
+                if (configManager && configManager.isWorkspaceIsolated) {
+                    addWorkspaceDialog.initialIsolatedStorage = configManager.isWorkspaceIsolated(addWorkspaceDialog.initialName);
+                } else {
+                    addWorkspaceDialog.initialIsolatedStorage = false;
                 }
                 addWorkspaceDialog.populateFields(addWorkspaceDialog.initialName);
                 addWorkspaceDialog.open();
@@ -561,7 +689,7 @@ Kirigami.ApplicationWindow {
     WorkspaceDialog {
         id: addWorkspaceDialog
         property int editingIndex: -1
-        onAcceptedWorkspace: function (workspaceName, iconName) {
+        onAcceptedWorkspace: function (workspaceName, iconName, isolatedStorage) {
             if (isEditMode) {
                 if (editingIndex >= 0 && editingIndex < root.workspaces.length && configManager) {
                     var oldWorkspaceName = root.workspaces[editingIndex];
@@ -569,10 +697,11 @@ Kirigami.ApplicationWindow {
                     // Always set/update icon regardless of rename
                     if (configManager.setWorkspaceIcon)
                         configManager.setWorkspaceIcon(workspaceName, iconName || "folder");
+                    // Note: isolated storage cannot be changed after creation
                 }
             } else {
                 if (configManager) {
-                    configManager.addWorkspace(workspaceName);
+                    configManager.addWorkspace(workspaceName, isolatedStorage);
                     if (configManager.setWorkspaceIcon)
                         configManager.setWorkspaceIcon(workspaceName, iconName || "folder");
                     // Switch to the newly created workspace
@@ -611,6 +740,12 @@ Kirigami.ApplicationWindow {
         function onDisabledServicesChanged() {
             // Update local disabledServices when configManager changes
             root.disabledServices = configManager.disabledServices;
+        }
+        function onMutedServicesChanged() {
+            root.mutedServices = configManager.mutedServices;
+        }
+        function onGlobalMuteChanged() {
+            root.globalMute = configManager.globalMute;
         }
         function onCurrentWorkspaceChanged() {
             // Sync QML currentWorkspace when ConfigManager changes it (e.g., after workspace deletion)
@@ -695,6 +830,28 @@ Kirigami.ApplicationWindow {
         if (trayIconManager) {
             trayIconManager.windowVisible = (root.visibility !== Window.Hidden && root.visibility !== Window.Minimized);
         }
+
+        // If window exits fullscreen (e.g. via OS gesture or Alt-Tab) while we are in content fullscreen mode,
+        // we need to tell the web content to exit fullscreen too.
+        if (isContentFullscreen && visibility !== Window.FullScreen && visibility !== Window.Minimized && visibility !== Window.Hidden) {
+            console.log("Window exited fullscreen (OS/User action) - syncing web content");
+            if (fullscreenWebView) {
+                fullscreenWebView.triggerWebAction(WebEngineView.ExitFullScreen);
+            }
+        }
+    }
+
+    // Handle window close - minimize to tray or quit based on setting
+    onClosing: function(close) {
+        if (configManager && configManager.systemTrayEnabled) {
+            // Minimize to tray instead of quitting
+            close.accepted = false
+            root.hide()
+            if (trayIconManager) {
+                trayIconManager.windowVisible = false
+            }
+        }
+        // If tray is disabled, let the app quit normally (close.accepted = true by default)
     }
 
     // Helper property to track horizontal sidebar setting
@@ -715,6 +872,12 @@ Kirigami.ApplicationWindow {
         // Add actions to the page header
         actions: [
             Kirigami.Action {
+                visible: root.globalMute
+                text: i18n("Unmute All")
+                icon.name: "player-volume-muted"
+                onTriggered: root.handleToggleGlobalMute()
+            },
+            Kirigami.Action {
                 visible: root.nowPlayingInfo !== null
                 displayHint: Kirigami.DisplayHint.KeepVisible
                 displayComponent: NowPlayingIndicator {
@@ -727,6 +890,97 @@ Kirigami.ApplicationWindow {
                     onSwitchToService: function (id) {
                         root.switchToService(id);
                     }
+                }
+            },
+            Kirigami.Action {
+                text: i18n("Refresh Service")
+                icon.name: "view-refresh"
+                enabled: root.currentServiceId !== ""
+                onTriggered: {
+                    if (root.currentServiceId !== "" && root.webViewStack) {
+                        root.webViewStack.refreshByServiceId(root.currentServiceId);
+                    }
+                }
+            },
+            Kirigami.Action {
+                visible: root.currentServiceId !== "" && configManager && configManager.showZoomInHeader
+                displayHint: Kirigami.DisplayHint.KeepVisible
+                displayComponent: Controls.ToolButton {
+                    text: Math.round(root.currentZoomFactor * 100) + "%"
+                    icon.name: root.currentZoomFactor === 1.0 ? "zoom" : (root.currentZoomFactor > 1.0 ? "zoom-in" : "zoom-out")
+                    enabled: root.currentServiceId !== ""
+                    onClicked: zoomMenu.popup()
+                    width: Kirigami.Units.gridUnit * 5
+
+                    Controls.ToolTip.text: i18n("Zoom: %1%", Math.round(root.currentZoomFactor * 100))
+                    Controls.ToolTip.visible: hovered
+                    Controls.ToolTip.delay: Kirigami.Units.toolTipDelay
+
+                    Controls.Menu {
+                        id: zoomMenu
+
+                        ColumnLayout {
+                            spacing: Kirigami.Units.smallSpacing
+
+                            RowLayout {
+                                spacing: Kirigami.Units.smallSpacing
+                                Layout.fillWidth: true
+
+                                Controls.ToolButton {
+                                    icon.name: "zoom-out"
+                                    enabled: root.currentZoomFactor > 0.25
+                                    onClicked: {
+                                        var newZoom = Math.max(0.25, root.currentZoomFactor - 0.25);
+                                        root.setZoomFactor(newZoom);
+                                    }
+                                    Controls.ToolTip.text: i18n("Zoom Out")
+                                    Controls.ToolTip.visible: hovered
+                                }
+
+                                Controls.Label {
+                                    text: Math.round(root.currentZoomFactor * 100) + "%"
+                                    Layout.minimumWidth: Kirigami.Units.gridUnit * 2
+                                    Layout.fillWidth: true
+                                    horizontalAlignment: Text.AlignHCenter
+                                }
+
+                                Controls.ToolButton {
+                                    icon.name: "zoom-in"
+                                    enabled: root.currentZoomFactor < 5.0
+                                    onClicked: {
+                                        var newZoom = Math.min(5.0, root.currentZoomFactor + 0.25);
+                                        root.setZoomFactor(newZoom);
+                                    }
+                                    Controls.ToolTip.text: i18n("Zoom In")
+                                    Controls.ToolTip.visible: hovered
+                                }
+                            }
+
+                            Controls.Button {
+                                text: i18n("Reset Zoom")
+                                icon.name: "zoom-original"
+                                enabled: root.currentZoomFactor !== 1.0
+                                Layout.fillWidth: true
+                                onClicked: {
+                                    root.setZoomFactor(1.0);
+                                    zoomMenu.close();
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            Kirigami.Action {
+                visible: root.currentServiceId !== "" && configManager && !configManager.showZoomInHeader && root.currentZoomFactor !== 1.0
+                displayHint: Kirigami.DisplayHint.KeepVisible
+                displayComponent: Controls.ToolButton {
+                    text: i18n("Reset Zoom")
+                    icon.name: "zoom-original"
+                    onClicked: root.setZoomFactor(1.0)
+
+                    Controls.ToolTip.text: i18n("Zoom: %1% - Click to reset", Math.round(root.currentZoomFactor * 100))
+                    Controls.ToolTip.visible: hovered
+                    Controls.ToolTip.delay: Kirigami.Units.toolTipDelay
                 }
             },
             Kirigami.Action {
@@ -763,6 +1017,7 @@ Kirigami.ApplicationWindow {
                         horizontal: false
                         services: root.filteredServices
                         disabledServices: root.disabledServices
+                        mutedServices: root.mutedServices
                         detachedServices: root.detachedServices
                         notificationCounts: root.serviceNotificationCounts
                         audibleServices: root.serviceAudibleStates
@@ -811,6 +1066,9 @@ Kirigami.ApplicationWindow {
                         onToggleFavoriteRequested: function (id) {
                             root.handleToggleFavorite(id);
                         }
+                        onToggleMuteRequested: function (id) {
+                            root.handleToggleMute(id);
+                        }
                     }
 
                     Rectangle {
@@ -824,7 +1082,11 @@ Kirigami.ApplicationWindow {
                             filteredCount: root.filteredServices.length
                             currentWorkspace: root.currentWorkspace
                             disabledServices: root.disabledServices
+                            mutedServices: root.mutedServices
+                            globalMute: root.globalMute
+                            serviceTabs: configManager ? configManager.serviceTabs : ({})
                             webProfile: persistentProfile
+                            workspaceIsolatedStorage: configManager ? configManager.workspaceIsolatedStorage : ({})
                             onTitleUpdated: root.updateBadgeFromTitle
                             onAudibleServicesChanged: {
                                 root.serviceAudibleStates = audibleServices;
@@ -851,6 +1113,24 @@ Kirigami.ApplicationWindow {
                                         favorite: service.favorite
                                     };
                                     configManager.updateService(serviceId, updatedService);
+                                }
+                            }
+                            onFullscreenRequested: function (webEngineView, toggleOn) {
+                                if (toggleOn) {
+                                    root.enterContentFullscreen(webEngineView);
+                                } else {
+                                    root.exitContentFullscreen();
+                                }
+                            }
+                            onServiceZoomFactorChanged: function (serviceId, zoomFactor) {
+                                if (configManager && serviceId === root.currentServiceId) {
+                                    configManager.setServiceZoomFactor(serviceId, zoomFactor);
+                                    root.currentZoomFactor = zoomFactor;
+                                }
+                            }
+                            onTabsUpdated: function (serviceId, tabs) {
+                                if (configManager) {
+                                    configManager.setTabsForService(serviceId, tabs);
                                 }
                             }
                             Component.onCompleted: {
@@ -882,6 +1162,7 @@ Kirigami.ApplicationWindow {
                     horizontal: true
                     services: root.filteredServices
                     disabledServices: root.disabledServices
+                    mutedServices: root.mutedServices
                     detachedServices: root.detachedServices
                     notificationCounts: root.serviceNotificationCounts
                     audibleServices: root.serviceAudibleStates
@@ -930,6 +1211,9 @@ Kirigami.ApplicationWindow {
                     onToggleFavoriteRequested: function (id) {
                         root.handleToggleFavorite(id);
                     }
+                    onToggleMuteRequested: function (id) {
+                        root.handleToggleMute(id);
+                    }
                 }
 
                 Rectangle {
@@ -943,7 +1227,11 @@ Kirigami.ApplicationWindow {
                         filteredCount: root.filteredServices.length
                         currentWorkspace: root.currentWorkspace
                         disabledServices: root.disabledServices
+                        mutedServices: root.mutedServices
+                        globalMute: root.globalMute
+                        serviceTabs: configManager ? configManager.serviceTabs : ({})
                         webProfile: persistentProfile
+                        workspaceIsolatedStorage: configManager ? configManager.workspaceIsolatedStorage : ({})
                         onTitleUpdated: root.updateBadgeFromTitle
                         onAudibleServicesChanged: {
                             root.serviceAudibleStates = audibleServices;
@@ -970,6 +1258,24 @@ Kirigami.ApplicationWindow {
                                     favorite: service.favorite
                                 };
                                 configManager.updateService(serviceId, updatedService);
+                            }
+                        }
+                        onFullscreenRequested: function (webEngineView, toggleOn) {
+                            if (toggleOn) {
+                                root.enterContentFullscreen(webEngineView);
+                            } else {
+                                root.exitContentFullscreen();
+                            }
+                        }
+                        onServiceZoomFactorChanged: function (serviceId, zoomFactor) {
+                            if (configManager && serviceId === root.currentServiceId) {
+                                configManager.setServiceZoomFactor(serviceId, zoomFactor);
+                                root.currentZoomFactor = zoomFactor;
+                            }
+                        }
+                        onServiceTabsChanged: function (serviceId, tabs) {
+                            if (configManager) {
+                                configManager.setTabsForService(serviceId, tabs);
                             }
                         }
                         Component.onCompleted: {
@@ -1060,6 +1366,17 @@ Kirigami.ApplicationWindow {
                 if (webView && webView.printPage) {
                     webView.printPage();
                 }
+            }
+        }
+    }
+
+    // Refresh current service with Ctrl+R or F5
+    Shortcut {
+        sequences: ["Ctrl+R", "F5"]
+        context: Qt.ApplicationShortcut
+        onActivated: {
+            if (root.currentServiceId !== "" && root.webViewStack) {
+                root.webViewStack.refreshByServiceId(root.currentServiceId);
             }
         }
     }
@@ -1364,7 +1681,7 @@ Kirigami.ApplicationWindow {
     // Function to disable/enable a service
     function setServiceEnabled(serviceId, enabled) {
         var service = findServiceById(serviceId);
-        if (service && service.workspace === currentWorkspace) {
+        if (service) {
             var webView = webViewStack.getWebViewByServiceId(serviceId);
             if (webView) {
                 if (enabled) {
@@ -1377,7 +1694,7 @@ Kirigami.ApplicationWindow {
                     webView.stop();
                     webView.url = "about:blank";
                 }
-                // Update configManager to persist the state
+                // Update configManager to persist the disabled state
                 if (configManager && configManager.setServiceDisabled) {
                     configManager.setServiceDisabled(serviceId, !enabled);
                 }
@@ -1474,5 +1791,105 @@ Kirigami.ApplicationWindow {
         configManager.moveService(currentIndex, targetIndex);
         console.log("Moved service down:", service.title);
         return true;
+    }
+
+    // Function to enter fullscreen mode for a WebEngineView
+    // Reparents the WebView to the fullscreen container to fill the entire screen
+    function enterContentFullscreen(webEngineView) {
+        if (isContentFullscreen || !webEngineView) {
+            return;
+        }
+
+        // Store state for restoration
+        fullscreenWebView = webEngineView;
+        fullscreenOriginalParent = webEngineView.parent;
+        wasWindowFullScreenBeforeContent = (root.visibility === Window.FullScreen);
+
+        // Store original background color and set to black to prevent white flash
+        fullscreenOriginalBgColor = webEngineView.backgroundColor;
+        webEngineView.backgroundColor = "black";
+
+        // Show the fullscreen container first (black background visible immediately)
+        isContentFullscreen = true;
+
+        // Make window fullscreen if not already
+        if (!wasWindowFullScreenBeforeContent) {
+            root.showFullScreen();
+        }
+
+        // Reparent WebView to fullscreen container
+        webEngineView.parent = fullscreenContainer;
+        webEngineView.anchors.fill = fullscreenContainer;
+        webEngineView.z = 1;  // Above the black background
+
+        // Ensure the WebEngineView has focus to receive ESC key
+        webEngineView.forceActiveFocus();
+
+        console.log("Entered content fullscreen mode");
+    }
+
+    // Function to exit fullscreen mode and restore the WebView
+    function exitContentFullscreen() {
+        if (!isContentFullscreen || !fullscreenWebView) {
+            return;
+        }
+
+        // Restore original background color
+        fullscreenWebView.backgroundColor = fullscreenOriginalBgColor;
+
+        // Restore WebView to original parent
+        if (fullscreenOriginalParent) {
+            fullscreenWebView.parent = fullscreenOriginalParent;
+            fullscreenWebView.anchors.fill = fullscreenOriginalParent;
+        }
+
+        // Hide fullscreen container
+        isContentFullscreen = false;
+
+        // Restore window state if we made it fullscreen
+        if (!wasWindowFullScreenBeforeContent) {
+            root.showNormal();
+        }
+
+        // Clear state
+        fullscreenWebView = null;
+        fullscreenOriginalParent = null;
+        wasWindowFullScreenBeforeContent = false;
+        fullscreenOriginalBgColor = "transparent";
+
+        console.log("Exited content fullscreen mode");
+    }
+
+    // Fullscreen container that overlays the entire window
+    // Used for page-initiated fullscreen (e.g., YouTube video fullscreen)
+    Item {
+        id: fullscreenContainer
+        parent: root.contentItem
+        anchors.fill: parent
+        visible: root.isContentFullscreen
+        z: 999999  // Always on top of everything
+
+        // Black background to hide anything behind and prevent white flash
+        Rectangle {
+            id: fullscreenBackground
+            anchors.fill: parent
+            color: "black"
+            z: 0
+        }
+
+        // WebEngineView will be reparented here with z: 1
+    }
+
+    // ESC key shortcut to exit page-initiated fullscreen
+    // This tells the web page to exit fullscreen, which triggers onFullScreenRequested(false)
+    Shortcut {
+        sequence: "Escape"
+        enabled: root.isContentFullscreen && root.fullscreenWebView
+        onActivated: {
+            if (root.fullscreenWebView) {
+                console.log("ESC pressed - triggering ExitFullScreen web action");
+                root.fullscreenWebView.triggerWebAction(WebEngineView.ExitFullScreen);
+            }
+        }
     }
 }

@@ -15,9 +15,16 @@ class ConfigManager : public QObject
     Q_PROPERTY(QStringList workspaces READ workspaces NOTIFY workspacesChanged)
     Q_PROPERTY(QString currentWorkspace READ currentWorkspace WRITE setCurrentWorkspace NOTIFY currentWorkspaceChanged)
     Q_PROPERTY(QVariantMap workspaceIcons READ workspaceIcons NOTIFY workspaceIconsChanged)
+    Q_PROPERTY(QVariantMap workspaceIsolatedStorage READ workspaceIsolatedStorage NOTIFY workspaceIsolatedStorageChanged)
     Q_PROPERTY(QVariantMap disabledServices READ disabledServices WRITE setDisabledServices NOTIFY disabledServicesChanged)
+    Q_PROPERTY(QVariantMap mutedServices READ mutedServices WRITE setMutedServices NOTIFY mutedServicesChanged)
+    Q_PROPERTY(QVariantMap serviceTabs READ serviceTabs NOTIFY serviceTabsChanged)
+    Q_PROPERTY(bool globalMute READ globalMute WRITE setGlobalMute NOTIFY globalMuteChanged)
     Q_PROPERTY(bool horizontalSidebar READ horizontalSidebar WRITE setHorizontalSidebar NOTIFY horizontalSidebarChanged)
     Q_PROPERTY(bool alwaysShowWorkspacesBar READ alwaysShowWorkspacesBar WRITE setAlwaysShowWorkspacesBar NOTIFY alwaysShowWorkspacesBarChanged)
+    Q_PROPERTY(bool confirmDownloads READ confirmDownloads WRITE setConfirmDownloads NOTIFY confirmDownloadsChanged)
+    Q_PROPERTY(bool systemTrayEnabled READ systemTrayEnabled WRITE setSystemTrayEnabled NOTIFY systemTrayEnabledChanged)
+    Q_PROPERTY(bool showZoomInHeader READ showZoomInHeader WRITE setShowZoomInHeader NOTIFY showZoomInHeaderChanged)
 
 public:
     explicit ConfigManager(QObject *parent = nullptr);
@@ -35,7 +42,7 @@ public:
     Q_INVOKABLE void removeService(const QString &serviceId);
     Q_INVOKABLE void moveService(int fromIndex, int toIndex);
 
-    Q_INVOKABLE void addWorkspace(const QString &workspaceName);
+    Q_INVOKABLE void addWorkspace(const QString &workspaceName, bool isolatedStorage = false);
     Q_INVOKABLE void removeWorkspace(const QString &workspaceName);
     Q_INVOKABLE void renameWorkspace(const QString &oldName, const QString &newName);
 
@@ -44,19 +51,47 @@ public:
     Q_INVOKABLE QString workspaceIcon(const QString &workspace) const;
     Q_INVOKABLE void setWorkspaceIcon(const QString &workspace, const QString &iconName);
 
+    // Per-workspace isolated storage mapping
+    QVariantMap workspaceIsolatedStorage() const;
+    Q_INVOKABLE bool isWorkspaceIsolated(const QString &workspace) const;
+    Q_INVOKABLE void setWorkspaceIsolatedStorage(const QString &workspace, bool isolated);
+
     // Disabled services management
     QVariantMap disabledServices() const;
     void setDisabledServices(const QVariantMap &disabledServices);
     Q_INVOKABLE void setServiceDisabled(const QString &serviceId, bool disabled);
     Q_INVOKABLE bool isServiceDisabled(const QString &serviceId) const;
 
-    // Horizontal sidebar mode
+    QVariantMap mutedServices() const;
+    void setMutedServices(const QVariantMap &mutedServices);
+    Q_INVOKABLE void setServiceMuted(const QString &serviceId, bool muted);
+    Q_INVOKABLE bool isServiceMuted(const QString &serviceId) const;
+
+    // Service tabs management
+    QVariantMap serviceTabs() const;
+    Q_INVOKABLE QVariantList getTabsForService(const QString &serviceId) const;
+    Q_INVOKABLE void setTabsForService(const QString &serviceId, const QVariantList &tabs);
+    Q_INVOKABLE void clearTabsForService(const QString &serviceId);
+
+    bool globalMute() const;
+    void setGlobalMute(bool enabled);
+
     bool horizontalSidebar() const;
     void setHorizontalSidebar(bool enabled);
 
     // Always show workspaces bar at bottom
     bool alwaysShowWorkspacesBar() const;
     void setAlwaysShowWorkspacesBar(bool enabled);
+
+    // Download confirmation setting
+    bool confirmDownloads() const;
+    void setConfirmDownloads(bool enabled);
+
+    bool systemTrayEnabled() const;
+    void setSystemTrayEnabled(bool enabled);
+
+    bool showZoomInHeader() const;
+    void setShowZoomInHeader(bool enabled);
 
     Q_INVOKABLE void saveSettings();
     Q_INVOKABLE void loadSettings();
@@ -68,6 +103,10 @@ public:
     // Favorites management
     Q_INVOKABLE void setServiceFavorite(const QString &serviceId, bool favorite);
     Q_INVOKABLE bool isServiceFavorite(const QString &serviceId) const;
+
+    // Zoom factor management (per service)
+    Q_INVOKABLE void setServiceZoomFactor(const QString &serviceId, qreal zoomFactor);
+    Q_INVOKABLE qreal serviceZoomFactor(const QString &serviceId) const;
 
     // Special workspaces
     Q_INVOKABLE bool isSpecialWorkspace(const QString &workspaceName) const;
@@ -81,9 +120,16 @@ Q_SIGNALS:
     void workspacesChanged();
     void currentWorkspaceChanged();
     void workspaceIconsChanged();
+    void workspaceIsolatedStorageChanged();
     void disabledServicesChanged();
+    void mutedServicesChanged();
+    void serviceTabsChanged();
+    void globalMuteChanged();
     void horizontalSidebarChanged();
     void alwaysShowWorkspacesBarChanged();
+    void confirmDownloadsChanged();
+    void systemTrayEnabledChanged();
+    void showZoomInHeaderChanged();
 
 private:
     void updateWorkspacesList();
@@ -94,9 +140,16 @@ private:
     QString m_currentWorkspace;
     QHash<QString, QString> m_lastServiceByWorkspace; // workspace -> serviceId
     QHash<QString, QString> m_workspaceIcons; // workspace -> icon name
+    QHash<QString, bool> m_workspaceIsolatedStorage; // workspace -> isolated storage flag
     QVariantMap m_disabledServices; // serviceId -> bool (true if disabled)
+    QVariantMap m_mutedServices; // serviceId -> bool (true if muted)
+    QVariantMap m_serviceTabs; // serviceId -> QVariantList of tabs
+    bool m_globalMute = false;
     bool m_horizontalSidebar = false;
     bool m_alwaysShowWorkspacesBar = false;
+    bool m_confirmDownloads = true;
+    bool m_systemTrayEnabled = true;
+    bool m_showZoomInHeader = true;
 };
 
 #endif // CONFIGMANAGER_H

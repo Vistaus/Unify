@@ -13,12 +13,14 @@ Controls.Button {
     property string image: ""
     property string serviceUrl: ""
     property bool useFavicon: false
+    property int faviconSource: -1  // -1 = legacy/default, 0 = Google, 1 = IconHorse
     property int buttonSize: 64
     property int iconSize: 48
     property bool disabledVisual: false
     property bool active: false
     property int notificationCount: 0
     property bool isPlayingAudio: false
+    property bool isMuted: false
     property bool isDisabled: false
     property bool isDetached: false
     property bool isFavorite: false
@@ -28,6 +30,7 @@ Controls.Button {
 
     signal editServiceRequested
     signal toggleFavoriteRequested
+    signal toggleMuteRequested
     signal moveUpRequested
     signal moveDownRequested
     signal refreshServiceRequested
@@ -72,6 +75,13 @@ Controls.Button {
         requestCachedAssets();
     }
 
+    onFaviconSourceChanged: {
+        if (root.useFavicon) {
+            root.cachedFaviconUrl = "";
+            requestCachedAssets();
+        }
+    }
+
     onImageChanged: {
         if (!root.useFavicon && root.isUrl) {
             root.cachedImageUrl = "";
@@ -86,10 +96,25 @@ Controls.Button {
 
         if (root.useFavicon && root.serviceUrl) {
             root.faviconLoading = true;
-            var cached = faviconCache.getFavicon(root.serviceUrl, true);
-            if (cached && cached !== "") {
-                root.cachedFaviconUrl = cached;
-                root.faviconLoading = false;
+
+            // Check if faviconSource is explicitly set (0 or 1)
+            if (root.faviconSource >= 0) {
+                // Use the selected favicon source
+                var cached = faviconCache.getFaviconForSource(root.serviceUrl, root.faviconSource);
+                if (cached && cached !== "") {
+                    root.cachedFaviconUrl = cached;
+                    root.faviconLoading = false;
+                } else {
+                    // Fetch from the specific source
+                    faviconCache.fetchFaviconFromSource(root.serviceUrl, root.faviconSource);
+                }
+            } else {
+                // Use legacy behavior (getFavicon with Google fallback)
+                var cached = faviconCache.getFavicon(root.serviceUrl, true);
+                if (cached && cached !== "") {
+                    root.cachedFaviconUrl = cached;
+                    root.faviconLoading = false;
+                }
             }
         } else if (!root.useFavicon && root.hasImage && root.isUrl) {
             root.imageLoading = true;
@@ -105,7 +130,15 @@ Controls.Button {
         target: typeof faviconCache !== "undefined" ? faviconCache : null
 
         function onFaviconReady(serviceUrl, localPath) {
-            if (root.useFavicon && root.serviceUrl === serviceUrl) {
+            // Only use this signal for legacy behavior (faviconSource < 0)
+            if (root.useFavicon && root.serviceUrl === serviceUrl && root.faviconSource < 0) {
+                root.cachedFaviconUrl = localPath;
+                root.faviconLoading = false;
+            }
+        }
+
+        function onFaviconSourceReady(serviceUrl, source, localPath) {
+            if (root.useFavicon && root.serviceUrl === serviceUrl && root.faviconSource === source) {
                 root.cachedFaviconUrl = localPath;
                 root.faviconLoading = false;
             }
@@ -158,6 +191,12 @@ Controls.Button {
             icon.name: "view-refresh"
             enabled: !root.isDisabled && !root.isDetached
             onTriggered: root.refreshServiceRequested()
+        }
+
+        Controls.MenuItem {
+            text: root.isMuted ? i18n("Unmute Service") : i18n("Mute Service")
+            icon.name: root.isMuted ? "player-volume" : "player-volume-muted"
+            onTriggered: root.toggleMuteRequested()
         }
 
         Controls.MenuSeparator {
@@ -363,7 +402,7 @@ Controls.Button {
 
         Rectangle {
             id: audioIndicatorWrapper
-            visible: root.isPlayingAudio
+            visible: root.isPlayingAudio && !root.isMuted
             anchors.top: parent.top
             anchors.left: parent.left
             anchors.margins: -Kirigami.Units.smallSpacing / 2
@@ -382,6 +421,27 @@ Controls.Button {
                 height: Kirigami.Units.iconSizes.small
                 source: "player-volume"
                 color: Kirigami.Theme.highlightedTextColor
+            }
+        }
+
+        // Muted indicator (shown in top-left corner when muted)
+        Rectangle {
+            id: mutedIndicatorWrapper
+            visible: root.isMuted
+            anchors.top: parent.top
+            anchors.left: parent.left
+            anchors.margins: -Kirigami.Units.smallSpacing / 2
+            height: Kirigami.Units.gridUnit
+            width: height
+            radius: height / 2
+            color: Kirigami.Theme.neutralTextColor
+
+            Kirigami.Icon {
+                anchors.centerIn: parent
+                width: Kirigami.Units.iconSizes.small
+                height: Kirigami.Units.iconSizes.small
+                source: "player-volume-muted"
+                color: Kirigami.Theme.backgroundColor
             }
         }
     }
